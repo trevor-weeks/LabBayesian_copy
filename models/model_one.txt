@@ -1,0 +1,23 @@
+model{
+  #  Data are all caps
+  #  Parameters all lower case
+
+  #  Priors
+  alpha ~ dnorm(0, 0.001)
+  ndvi_eff ~ dnorm(0, 0.001)
+
+  # Alternative priors
+  # alpha ~ dunif(-10, 10)
+  # ndvi_eff ~ dunif(-10, 10)
+
+  # Linear Predictor
+  for(i in 1:NOBS){
+    logit(p[i]) <- alpha + ndvi_eff * NDVI[i]
+  }
+
+  # Likelihood
+  for(i in 1:NOBS){
+    PRES[i] ~ dbern(p[i])
+  }
+
+}

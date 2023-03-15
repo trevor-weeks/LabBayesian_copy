@@ -1,0 +1,365 @@
+---
+title: "Lab 9 Bayesian RSF"
+author: "Josh Nowak, Mark Hebblewhite, Sarah Straughan"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+require(knitr)
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE, message = F)
+r <- getOption("repos")
+r["CRAN"] <- "https://ftp.osuosl.org/pub/cran/"
+options(repos = r)
+```
+
+The code in this repo was created during a lab with WILD 562. The sim_fit script shows the user one simple way to simulate data for a binomial regression, in this case a resource selection function (RSF). The script also allows the user to fit a basic regression considering covariates (model_one.txt) and a second model with an individual random effect (model_two.txt). For the sake of creating good habits a few functions were written in the script to help with summarizing results, but please recognize that there are established packages that accomplish these same tasks better than what was written here (https://github.com/mjskay/tidybayes).
+
+The purpose of these scripts is to provide a simple entry point that allows the user to become familiar with the simulated/fit workflow and the querks of running an analysis in R. For those interested in fitting RSFs in R I would consider reading the ecology and spatial task views in R to get a feel for the types of analyses that are packaged for you. In addition, those interested in Bayesian methods should consider alternative ways to call the models such as rjags, rstan and jagsUI.
+
+```{r packages}
+
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+#load or install these packages:
+packages <- c("tidyverse", "mcmcplots", "R2jags", "ResourceSelection","purrr", "glmmTMB")
+#run function to install packages
+ipak(packages)
+```
+
+
+## Model 1 - no random effects
+
+```{r Model 1, echo=TRUE, message=FALSE, warning=FALSE}
+
+rsf_m1dat <- tibble::tibble(
+  ndvi = rnorm(length(id)),
+  pres = rbinom(length(id), size = 1, prob = plogis(0.5 + 0.3 * ndvi))
+)
+
+# Exploring priors
+hist(plogis(rnorm(100000, 0, sqrt(1/0.001))), breaks = 100, col = "dodgerblue")
+hist(plogis(rnorm(100000, 0, sqrt(1/0.5))), breaks = 100, col = "dodgerblue")
+hist(plogis(runif(10000, -5, 5)))
+
+# Gather data for JAGS - must be named list
+jdat_m1 <- list(
+  NOBS = nrow(rsf_m1dat),
+
+  NDVI = rsf_m1dat$ndvi,
+  PRES = rsf_m1dat$pres
+)
+
+# Create initial values
+jinits <- function(){
+  list(
+    alpha = rnorm(1),
+    ndvi_eff = rnorm(1)
+  )
+}
+
+# Parameters to monitor
+params_m1 <- c("alpha", "ndvi_eff")
+```
+
+You will need to have JAGS downloaded before you can run this code. Download [Here](http://www.sourceforge.net/projects/mcmc-jags/files). JAGS stands for Just Another Gibbs Sampler and quoting the program author, Martyn Plummer, “It is a program for analysis of Bayesian hierarchical models using Markov Chain Monte Carlo (MCMC) simulation…” 
+
+```{r}
+#Call JAGS
+fit_m1 <- jags(
+  data = jdat_m1,
+  inits = jinits,
+  parameters.to.save = params_m1,
+  model.file = "models/model_one.txt",
+  n.chains = 3,
+  n.burnin = 500,
+  n.iter = 600,
+  n.thin = 1
+)
+```
+Here we write a function to summarise results, we write a function because this action willvbe repeated multiple times
+```{r}
+summ_fun <- function(x, param){
+  tibble::tibble(
+    Parameter = param,
+    Mean = mean(x$BUGS$sims.list[[param]]),
+    SD = sd(x$BUGS$sims.list[[param]]),
+    LCL = quantile(x$BUGS$sims.list[[param]], probs = .025),
+    UCL = quantile(x$BUGS$sims.list[[param]], probs = .975)
+  )
+}
+```
+Next, we create a function to determine if a parameter value is greater than 0
+```{r}
+grtr_zero <- function(x, param){
+  sum(x$BUGS$sims.list[[param]] > 0)/length(x$BUGS$sims.list[[param]])
+}
+
+summ_fun(fit_m1, "alpha")
+summ_fun(fit_m1, "ndvi_eff")
+
+grtr_zero(fit_m1, "alpha")
+grtr_zero(fit_m1, "ndvi_eff")
+
+```
+The purrr package implements some clean functions aimed at the tenants of functional programming, here we loop over a series of inputs while calling a function
+
+```{r}
+
+purrr::map_df(c("alpha", "ndvi_eff"), ~summ_fun(fit_m1, .x))
+
+#  More generic
+purrr::map_df(params_m1, ~summ_fun(fit_m1, .x))
+
+```
+The mcmcplots package has several useful utilities to help with assessing convergence and examining model outputs
+
+```{r}
+mcmcplots::mcmcplot(fit_m1)
+```
+
+## Model 2 - Bayesian Model with Random Intercept for Individual Elk
+
+```{r Model 2, message=FALSE, warning=FALSE}
+
+rsf_m2dat <- tibble::tibble(
+  id = rep(1:3, each = 5),
+  ndvi = rnorm(length(id)),
+  pres = rbinom(length(id), size = 1, prob = plogis(0.5 + 0.3 * ndvi))
+)
+
+# Exploring priors
+hist(plogis(rnorm(100000, 0, sqrt(1/0.001))), breaks = 100, col = "dodgerblue")
+hist(plogis(rnorm(100000, 0, sqrt(1/0.5))), breaks = 100, col = "dodgerblue")
+hist(plogis(runif(10000, -5, 5)))
+
+# Gather data for JAGS - must be named list
+jdat_m2 <- list(
+  NOBS = nrow(rsf_m2dat),
+  NIND = n_distinct(rsf_m2dat$id),
+
+  IND = rsf_m2dat$id,
+  NDVI = rsf_m2dat$ndvi,
+  PRES = rsf_m2dat$pres
+)
+
+
+# Parameters to monitor
+params_m2 <- c("alpha", "ndvi_eff", "ind_eff", "sd_ind")
+
+# Call JAGS
+fit_m2 <- jags(
+  data = jdat_m2,
+  inits = jinits,
+  parameters.to.save = params_m2,
+  model.file = "models/model_two.txt",
+  n.chains = 3,
+  n.burnin = 500,
+  n.iter = 600,
+  n.thin = 1
+)
+
+
+summ_fun(fit_m2, "alpha")
+summ_fun(fit_m2, "ndvi_eff")
+
+grtr_zero(fit_m2, "alpha")
+grtr_zero(fit_m2, "ndvi_eff")
+
+```
+
+
+```{r}
+
+purrr::map_df(c("alpha", "ndvi_eff"), ~summ_fun(fit_m2, .x))
+
+#  More generic
+purrr::map_df(params_m2, ~summ_fun(fit_m2, .x))
+
+```
+
+
+```{r}
+mcmcplots::mcmcplot(fit_m2)
+```
+
+Also check out the Bayesian task view in R and tidybayes in particular
+
+
+
+
+## RSF analysis of mountain goats (Section 4.1)
+Authors: S. Muff, J. Signer, J. Fieberg
+
+ -[Link to Paper](https://besjournals.onlinelibrary.wiley.com/doi/full/10.1111/1365-2656.13087)
+ -[Link to Code](https://conservancy.umn.edu/bitstream/handle/11299/204737/Goats_RSF.R?sequence=20&isAllowed=y)
+
+
+
+To install the INLA-package in R, you have to manually add the r-inla repository as they are not on CRAN. You may have to restart your R session before installation -- this is the type of thing where in the afternoon the install code did not work for me and the next morning it worked -- the only difference being that I had restarted R in between and ran the following code before anything else:
+
+Load libraries and data
+```{r INLA Installation, eval=FALSE}
+install.packages("INLA",repos=c(getOption("repos"),INLA="https://inla.r-inla-download.org/R/stable"), dep=TRUE)
+```
+
+```{r}
+
+library(INLA)
+data(goats)
+str(goats)
+
+#Scale and center variables
+goats$ELEVATION <- scale(goats$ELEVATION)
+goats$TASP <- scale(goats$TASP)
+
+#Use and available data by animal
+with(goats, prop.table(table(ID, STATUS), 1))
+```
+
+
+
+### Model M1: using `glmmTMB()`
+
+  - Fixed Effects: elevation
+  - Random Effects: intercept only
+
+```{r}
+goats.M1 <- glmmTMB(STATUS ~ ELEVATION  + (1|ID), family=binomial(), data = goats)
+summary(goats.M1)
+```
+
+### Model M2
+
+  - Fixed Effects: elevation, aspect
+  - Random Effects: intercept only
+
+```{r}
+goats.M2 <- glmmTMB(STATUS ~ ELEVATION + TASP + (1|ID), family=binomial(), data = goats)
+summary(goats.M2)
+```
+
+### Model M3
+
+ - Fixed Effects: elevation, aspect
+ - Random Effects: intercepts and slopes (elevation, aspect)
+
+```{r}
+goats.M3 <- glmmTMB(STATUS ~ TASP +  ELEVATION + (1|ID) + (0+ELEVATION |ID) + (0+TASP|ID), family=binomial(), data = goats)
+summary(goats.M3)
+
+```
+
+### Model M4 (with fixed intercept variance)
+
+- Fixed Effects: elevation
+- Random Effects: intercept (with large fixed variance), elevation, aspect
+
+ Here, we also use a weighted likelihood. To this end, we need to create a variable for the weights, where used points (`STATUS=1`) keep weight 1, and available points (`STATUS=0`) obtain a large weight $W$ (here $W=1000$):
+ 
+```{r}
+goats$weight <- 1000^(1-goats$STATUS)
+```
+
+ We fit the same model as under M3, again using `glmmTMB`. Note that we have to manually fix the variance of the intercept first. Start by setting up the model, but do not yet fit it:
+```{r}
+goats.M4.tmp <- glmmTMB(STATUS ~   ELEVATION + TASP + (1|ID) + (0+ELEVATION |ID) + (0+TASP|ID), family=binomial(), data = goats,doFit=F, weights = weight)
+```
+
+
+Then fix the standard deviation of the first random term, which is the `(1|ID)` component  in the above model equation. We use $\sigma=10^3$, which corresponds to a variance of $10^6$:
+```{r}
+goats.M4.tmp$parameters$theta[1] = log(1e3)
+
+```
+We need to tell `glmmTMB` not to change the first entry of the vector of variances, and give all other variances another indicator to make sure they can be freely estimated:
+
+```{r}
+goats.M4.tmp$mapArg = list(theta=factor(c(NA,1:2)))
+```
+
+Then fit the model and look at the results:
+
+```{r}
+goats.M4 <- glmmTMB:::fitTMB(goats.M4.tmp)
+summary(goats.M4)
+```
+
+### Model M4 (with intercept variance estimated)
+
+For comparison, we again fit model M4, but without fixing the intercept variance, letting it be estimated instead. Importantly, estimating the intercept variance is the current standard procedure. For this particular RSF case, it does not lead to a real difference, as expected due to the many observations per individual. This confirms that the decision to fix or estimate the intercept variance is not critical for RSFs, in contrast to SSFs (see Discussion in the paper).
+
+
+```{r}
+goats.M4.2 <- glmmTMB(STATUS ~   ELEVATION + TASP + (1|ID) + (0+ELEVATION |ID) + (0+TASP|ID), family=binomial(), data = goats, weights = weight)
+summary(goats.M4.2)
+```
+
+##  INLA (only model M4)
+
+Let us now carry the analysis of model M4 with random intercept $\mathsf{N}(0,\sigma_{ID}^2)$ and fixed variance $\sigma_{ID}^2=10^6$ using INLA. A peculiarity of INLA is that the same variable cannot be used more than once. So for ID we need to generate two new (but identical) variables:
+
+```{r}
+goats$ID2 <- goats$ID3 <- goats$ID
+```
+
+ For the fixed effects we use the INLA (default) priors $\beta \sim \mathsf{N}(0,\sigma_\beta^2)$ with $\sigma_\beta^2=10^4$. The precisions of the priors are thus set to:
+
+
+```{r}
+prec.beta.TASP  <- 1e-4
+prec.beta.ELEVATION  <- 1e-4
+```
+
+The INLA formula with the fixed effects `TASP` and `ELEVATION`, plus three random effects: one for the individual-specific intercept, and two random slopes for `TASP` and `ELEVATION`. Note that the precision (thus $1/\sigma^2$) for `ID` is fixed (`fixed=T`) at the value of $10^{-6}$ (thus the variance is fixed at $10^6$). The precisions for the random slopes for `TASP` and `ELEVATION` are given PC(1,0.05) priors:
+
+```{r}
+formula.inla <-STATUS ~  TASP  + ELEVATION +
+  f(ID,model="iid",hyper=list(theta = list(initial=log(1e-6),fixed=T))) +
+  f(ID2,TASP,values=1:10,model="iid",
+    hyper=list(theta=list(initial=log(1),fixed=F,prior="pc.prec",param=c(1,0.05)))) +
+  f(ID3,ELEVATION,values=1:10,model="iid",
+    hyper=list(theta=list(initial=log(1),fixed=F,prior="pc.prec",param=c(1,0.05))))
+
+```
+
+The actual INLA call is then given as follows:
+```{r echo=TRUE, message=FALSE, cache=TRUE}
+#inla.setOption(enable.inla.argument.weights=TRUE) #this line did not work but rest of code worked without it??
+goats.M4.inla  <- inla(formula.inla, family ="binomial", data=goats, weights=goats$weight,
+                       control.fixed = list(
+                         mean = 0,
+                         prec = list(TASP = prec.beta.TASP,
+                                     ELEVATION = prec.beta.ELEVATION)
+                       )
+)
+```
+
+
+The summary for the posterior distribution of the fixed effects is given as follows:
+```{r}
+goats.M4.inla$summary.fixed
+```
+
+Since variances are parameterized and treated as precisions, the summary of the respective posterior distributions is given for the precisions:
+
+```{r}
+goats.M4.inla$summary.hyperpar
+```
+Source R functions for calculating posterior means and medians of the precisions.
+Not currently functioning
+
+```{r eval = FALSE}
+source("inla_emarginal.R")
+source("inla_mmarginal.R")
+inla_emarginal(goats.M4.inla)
+inla_mmarginal(goats.M4.inla)
+```
+```{r eval=FALSE, include=FALSE}
+knitr::purl(input = "README.Rmd", output = "labBayesian.R", documentation = 1)
+```
